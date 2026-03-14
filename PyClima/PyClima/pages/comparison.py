@@ -48,12 +48,12 @@ st.markdown("""
 
 # Generate synthetic climate data
 @st.cache_data
-def generate_climate_data(years=50):
+def generate_climate_data():
     np.random.seed(42)
     
     lats = np.linspace(-90, 90, 30)
     lons = np.linspace(-180, 180, 60)
-    years_range = np.arange(1970, 1970 + years)
+    years_range = np.arange(1970, 2027)
     
     data = []
     for year in years_range:
@@ -94,11 +94,11 @@ with st.sidebar:
     
     # Time period 1
     st.subheader("Period 1")
-    year1 = st.slider("Select Year", 1970, 2019, 1990, key="year1")
+    year1 = st.slider("Select Year", 1970, 2026, 1990, key="year1")
     
     # Time period 2
     st.subheader("Period 2")
-    year2 = st.slider("Select Year", 1970, 2019, 2019, key="year2")
+    year2 = st.slider("Select Year", 1970, 2026, 2026, key="year2")
     
     st.markdown("---")
     
@@ -117,9 +117,9 @@ st.markdown(f"### Comparing {year1} vs {year2}")
 with st.spinner("Loading climate data..."):
     climate_data = generate_climate_data()
 
-# Get data for both periods
-data_period1 = climate_data[climate_data['year'] == year1]
-data_period2 = climate_data[climate_data['year'] == year2]
+# Get data for both periods — reset index to avoid alignment errors
+data_period1 = climate_data[climate_data['year'] == year1].reset_index(drop=True)
+data_period2 = climate_data[climate_data['year'] == year2].reset_index(drop=True)
 
 # Calculate difference
 data_diff = data_period2.copy()
@@ -165,7 +165,7 @@ with col_map1:
             color=data_period1[variable],
             colorscale='RdYlBu_r' if variable == 'temperature' else 'Blues',
             showscale=True,
-            colorbar=dict(title=variable_display, x=0.45),
+            colorbar=dict(title=variable_display, x=1.0, xanchor='left', thickness=15),
             line=dict(width=0),
             cmin=data_period1[variable].min(),
             cmax=data_period2[variable].max()
@@ -182,10 +182,11 @@ with col_map1:
             coastlinecolor='rgb(100, 100, 100)',
             showocean=True,
             oceancolor='rgb(14, 17, 23)',
-            bgcolor='rgb(14, 17, 23)'
+            bgcolor='rgb(14, 17, 23)',
+            domain=dict(x=[0, 0.85])
         ),
         height=400,
-        margin=dict(l=0, r=0, t=0, b=0),
+        margin=dict(l=0, r=60, t=0, b=0),
         paper_bgcolor='rgb(14, 17, 23)',
         plot_bgcolor='rgb(14, 17, 23)'
     )
@@ -204,7 +205,7 @@ with col_map2:
             color=data_period2[variable],
             colorscale='RdYlBu_r' if variable == 'temperature' else 'Blues',
             showscale=True,
-            colorbar=dict(title=variable_display, x=1.0),
+            colorbar=dict(title=variable_display, x=1.0, xanchor='left', thickness=15),
             line=dict(width=0),
             cmin=data_period1[variable].min(),
             cmax=data_period2[variable].max()
@@ -221,10 +222,11 @@ with col_map2:
             coastlinecolor='rgb(100, 100, 100)',
             showocean=True,
             oceancolor='rgb(14, 17, 23)',
-            bgcolor='rgb(14, 17, 23)'
+            bgcolor='rgb(14, 17, 23)',
+            domain=dict(x=[0, 0.85])
         ),
         height=400,
-        margin=dict(l=0, r=0, t=0, b=0),
+        margin=dict(l=0, r=60, t=0, b=0),
         paper_bgcolor='rgb(14, 17, 23)',
         plot_bgcolor='rgb(14, 17, 23)'
     )
@@ -315,14 +317,16 @@ with col_graph1:
 
 with col_graph2:
     # Regional comparison (by latitude bands)
-    lat_bands = pd.cut(data_period1['lat'], bins=6, labels=['Polar S', 'Temp S', 'Trop S', 'Trop N', 'Temp N', 'Polar N'])
-    
+    band_labels = ['Polar S', 'Temp S', 'Trop S', 'Trop N', 'Temp N', 'Polar N']
+    bins = [-90, -66.5, -23.5, 0, 23.5, 66.5, 90]
+
+    data_period1['lat_band'] = pd.cut(data_period1['lat'], bins=bins, labels=band_labels)
+    data_period2['lat_band'] = pd.cut(data_period2['lat'], bins=bins, labels=band_labels)
+
     regional_data = pd.DataFrame({
-        'Region': lat_bands.unique(),
-        year1: [data_period1[data_period1['lat'].isin(data_period1[lat_bands == band]['lat'])][variable].mean() 
-                for band in lat_bands.unique()],
-        year2: [data_period2[data_period2['lat'].isin(data_period2[lat_bands == band]['lat'])][variable].mean() 
-                for band in lat_bands.unique()]
+        'Region': band_labels,
+        year1: [data_period1[data_period1['lat_band'] == band][variable].mean() for band in band_labels],
+        year2: [data_period2[data_period2['lat_band'] == band][variable].mean() for band in band_labels],
     })
     
     fig_regional = go.Figure()

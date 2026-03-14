@@ -56,29 +56,24 @@ if 'selected_location' not in st.session_state:
 if 'selected_coords' not in st.session_state:
     st.session_state.selected_coords = None
 
-# Generate synthetic climate data
+# Generate synthetic climate data up to 2026
 @st.cache_data
-def generate_climate_data(years=50):
+def generate_climate_data():
     np.random.seed(42)
     
-    # Generate grid of lat/lon points
     lats = np.linspace(-90, 90, 30)
     lons = np.linspace(-180, 180, 60)
-    years_range = np.arange(1970, 1970 + years)
+    years_range = np.arange(1970, 2027)  # up to 2026
     
     data = []
     for year in years_range:
         for lat in lats:
             for lon in lons:
-                # Temperature with warming trend
                 base_temp = 15 + 20 * np.cos(np.radians(lat))
                 trend = (year - 1970) * 0.02
                 temp = base_temp + trend + np.random.normal(0, 2)
                 
-                # Precipitation
                 precip = max(0, 100 + 50 * np.sin(np.radians(lat)) + np.random.normal(0, 20))
-                
-                # Wind speed
                 wind = max(0, 10 + 5 * abs(np.sin(np.radians(lat))) + np.random.normal(0, 2))
                 
                 data.append({
@@ -92,9 +87,10 @@ def generate_climate_data(years=50):
     
     return pd.DataFrame(data)
 
-# Generate predictions using simple linear regression
+# Generate predictions using linear regression + user assumptions
 @st.cache_data
-def generate_predictions(historical_data, years_ahead=30):
+def generate_predictions(historical_data, years_ahead=30, scenario_mult=1.0,
+                         temp_sensitivity=0.2, precip_change=0):
     from sklearn.linear_model import LinearRegression
     
     predictions = []
@@ -106,23 +102,29 @@ def generate_predictions(historical_data, years_ahead=30):
             
             if len(subset) > 0:
                 X = subset[['year']].values
-                
+                base_year = X.max()
+                future_years = np.arange(base_year + 1, base_year + years_ahead + 1).reshape(-1, 1)
+
                 for var in ['temperature', 'precipitation', 'wind_speed']:
                     y = subset[var].values
                     model = LinearRegression()
                     model.fit(X, y)
-                    
-                    future_years = np.arange(X.max() + 1, X.max() + years_ahead + 1).reshape(-1, 1)
-                    future_values = model.predict(future_years)
-                    
+                    future_values = model.predict(future_years).copy()
+
+                    # Apply assumption adjustments
+                    decades = (future_years.flatten() - base_year) / 10
+                    if var == 'temperature':
+                        future_values += decades * temp_sensitivity * scenario_mult
+                    elif var == 'precipitation':
+                        future_values *= (1 + (precip_change / 100) * scenario_mult) ** decades
+
                     for i, year in enumerate(future_years.flatten()):
-                        pred_dict = {
+                        predictions.append({
                             'year': year,
                             'lat': lat,
                             'lon': lon,
                             var: future_values[i]
-                        }
-                        predictions.append(pred_dict)
+                        })
     
     return pd.DataFrame(predictions)
 
@@ -170,6 +172,85 @@ with st.sidebar:
     # Dataset selection
     st.subheader("Dataset")
     dataset = st.selectbox("Select Dataset", ["Global Climate Model", "Historical Records"])
+
+    # File upload
+    st.subheader("Upload Dataset")
+    uploaded_file = st.file_uploader(
+        "Upload NetCDF file",
+        type=["nc"],
+        help="Upload any NetCDF (.nc) file — you'll map its variables after upload"
+    )
+    if uploaded_file:
+        try:
+            import xarray as xr
+            import tempfile, os
+            tmp = tempfile.NamedTemporaryFile(suffix=".nc", delete=False)
+            tmp.write(uploaded_file.read())
+            tmp.close()
+            tmp_path = tmp.name
+            try:
+                ds = xr.open_dataset(tmp_path)
+                file_vars = list(ds.data_vars)
+                file_dims = list(ds.dims)
+                all_options = file_vars + file_dims
+                ds.close()
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+            st.caption(f"Variables found: `{', '.join(file_vars)}` | Dims: `{', '.join(file_dims)}`")
+
+            # Let user map variables
+            st.markdown("**Map your variables:**")
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                map_temp  = st.selectbox("Temperature variable",  all_options, key="map_temp")
+                map_precip = st.selectbox("Precipitation variable", all_options, key="map_precip")
+            with mc2:
+                map_wind  = st.selectbox("Wind Speed variable",   all_options, key="map_wind")
+                map_lat   = st.selectbox("Latitude dim/var",      all_options, key="map_lat")
+            mc3, mc4 = st.columns(2)
+            with mc3:
+                map_lon  = st.selectbox("Longitude dim/var", all_options, key="map_lon")
+            with mc4:
+                map_year = st.selectbox("Year/Time dim/var", all_options, key="map_year")
+
+            if st.button("✅ Load Dataset", use_container_width=True):
+                tmp2 = tempfile.NamedTemporaryFile(suffix=".nc", delete=False)
+                uploaded_file.seek(0)
+                tmp2.write(uploaded_file.read())
+                tmp2.close()
+                try:
+                    ds2 = xr.open_dataset(tmp2.name)
+                    rename_map = {
+                        map_temp: 'temperature',
+                        map_precip: 'precipitation',
+                        map_wind: 'wind_speed',
+                    }
+                    # only rename vars that exist and differ
+                    rename_map = {k: v for k, v in rename_map.items() if k in ds2.data_vars and k != v}
+                    ds2 = ds2.rename(rename_map)
+                    df = ds2[['temperature', 'precipitation', 'wind_speed']].to_dataframe().reset_index()
+                    ds2.close()
+                    dim_rename = {map_lat: 'lat', map_lon: 'lon', map_year: 'year'}
+                    dim_rename = {k: v for k, v in dim_rename.items() if k in df.columns and k != v}
+                    df = df.rename(columns=dim_rename).dropna()
+                    st.session_state['uploaded_data'] = df
+                    st.success(f"Loaded {len(df):,} rows from NetCDF")
+                finally:
+                    try:
+                        os.unlink(tmp2.name)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            st.error(f"Error reading NetCDF file: {e}")
+
+    if 'uploaded_data' in st.session_state and st.button("❌ Clear Upload", use_container_width=True):
+        del st.session_state['uploaded_data']
+        st.rerun()
     
     # Variable selection
     st.subheader("Variable")
@@ -183,12 +264,32 @@ with st.sidebar:
     
     # Year range
     st.subheader("Time Range")
-    year_range = st.slider("Select Years", 1970, 2019, (1990, 2019))
+    year_range = st.slider("Select Years", 1970, 2026, (1990, 2026))
     
     # Region selection
     st.subheader("Region")
     region = st.selectbox("Select Region", 
                          ["Global", "North America", "Europe", "Asia", "Africa", "South America", "Oceania"])
+
+    # Prediction assumptions
+    st.markdown("---")
+    st.subheader("🔮 Prediction Assumptions")
+    years_ahead = st.slider("Years to Predict", 5, 80, 30)
+    scenario = st.selectbox("Emission Scenario", [
+        "Business as Usual (High)",
+        "Moderate Mitigation",
+        "Aggressive Mitigation (Low)"
+    ])
+    scenario_multipliers = {
+        "Business as Usual (High)": 1.5,
+        "Moderate Mitigation": 1.0,
+        "Aggressive Mitigation (Low)": 0.4
+    }
+    scenario_mult = scenario_multipliers[scenario]
+    temp_sensitivity = st.slider("Warming Sensitivity (°C/decade)", 0.1, 0.8, 0.2, step=0.05,
+                                  help="Assumed temperature rise per decade beyond the trend")
+    precip_change = st.slider("Precipitation Trend (%/decade)", -20, 20, 0,
+                               help="Assumed % change in precipitation per decade")
     
     st.markdown("---")
     
@@ -203,8 +304,12 @@ with st.sidebar:
 st.title("Climate Data Dashboard")
 
 # Load data
-with st.spinner("Loading climate data..."):
-    climate_data = generate_climate_data()
+if 'uploaded_data' in st.session_state:
+    climate_data = st.session_state['uploaded_data']
+    st.info("📂 Using uploaded dataset")
+else:
+    with st.spinner("Loading climate data..."):
+        climate_data = generate_climate_data()
     
 # Filter by year range
 filtered_data = climate_data[(climate_data['year'] >= year_range[0]) & 
@@ -343,7 +448,13 @@ st.markdown("---")
 st.subheader("🔮 Future Climate Predictions")
 
 with st.spinner("Generating predictions..."):
-    predictions = generate_predictions(location_data, years_ahead=30)
+    predictions = generate_predictions(
+        location_data,
+        years_ahead=years_ahead,
+        scenario_mult=scenario_mult,
+        temp_sensitivity=temp_sensitivity,
+        precip_change=precip_change
+    )
     
 # Combine historical and predictions
 fig_pred = go.Figure()
@@ -370,7 +481,7 @@ if variable in pred_location.columns:
     ))
 
 fig_pred.update_layout(
-    title=f"Historical & Predicted {variable_display}",
+    title=f"Historical & Predicted {variable_display} — {scenario}",
     xaxis_title="Year",
     yaxis_title=variable_display,
     height=400,
